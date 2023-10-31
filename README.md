@@ -72,6 +72,9 @@ https://chartcube.alipay.com
 
 **前端**
 
+- 自动生成后端调用代码
+- 修改requestErrorConfig
+
 - 登录功能
 - 图表分析页面
 - 图表管理页面
@@ -192,10 +195,11 @@ create table if not exists chart
     chartType  varchar(128)                       null comment '图表类型',
     genChart   text                               null comment 'AI生成的图表数据',
     genSummary text                               null comment 'AI生成的分析总结',
+    userId     bigint                             null comment '创建人id',
     createTime datetime default CURRENT_TIMESTAMP not null comment '创建时间',
     updateTime datetime default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP comment '更新时间',
     isDelete   tinyint  default 0                 not null comment '是否删除'
-) comment '图表信息表' collate = utf8mb4_unicode_ci;
+) comment '图表信息' collate = utf8mb4_unicode_ci;
 ```
 
 ### 自动生成增删改查代码
@@ -233,3 +237,93 @@ create table if not exists chart
 5. 删掉WxMPController
 
    ![image-20231031143826847](assets/image-20231031143826847.png)
+
+### 图表管理
+
+1. 复制PostController修改成ChartController
+
+   ![image-20231031145120748](assets/image-20231031145120748.png)
+
+   ![image-20231031145230166](assets/image-20231031145230166.png)
+
+   ![image-20231031145445986](assets/image-20231031145445986.png)  
+
+2. 创建关于Chart的DTO类
+
+   ![image-20231031153057014](assets/image-20231031153057014.png)
+
+3. 剪裁ChartController并为ChartService提供getQueryWrapper方法
+
+   ```java
+   /**
+   * @author 落樱的悔恨
+   * @description 针对表【chart(图表信息表)】的数据库操作Service实现
+   * @createDate 2023-10-31 14:16:29
+   */
+   @Service
+   public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
+       implements ChartService{
+   
+       /**
+        * 获取查询包装类
+        *
+        * @param chartQueryRequest
+        * @return
+        */
+       @Override
+       public QueryWrapper<Chart> getQueryWrapper(ChartQueryRequest chartQueryRequest) {
+           QueryWrapper<Chart> queryWrapper = new QueryWrapper<>();
+           if (chartQueryRequest == null) {
+               return queryWrapper;
+           }
+           Long id = chartQueryRequest.getId();
+           Long userId = chartQueryRequest.getUserId();
+           String goal = chartQueryRequest.getGoal();
+           String chartType = chartQueryRequest.getChartType();
+           String sortField = chartQueryRequest.getSortField();
+           String sortOrder = chartQueryRequest.getSortOrder();
+           // 拼接查询条件
+           queryWrapper.eq(id != null && id > 0, "id", id);
+           queryWrapper.eq(ObjectUtils.isNotEmpty(userId), "userId", userId);
+           queryWrapper.like(StringUtils.isNotEmpty(goal),"goal",goal);
+           queryWrapper.like(StringUtils.isNotEmpty(chartType),"chartType",chartType);
+           queryWrapper.eq("isDelete", false);
+           queryWrapper.orderBy(SqlUtils.validSortField(sortField), sortOrder.equals(CommonConstant.SORT_ORDER_ASC),
+                   sortField);
+           return queryWrapper;
+       }
+   }
+   ```
+
+   
+
+   
+
+## 前端
+
+### 自动生成后端调用代码
+
+![image-20231031161114725](assets/image-20231031161114725.png)
+
+![image-20231031161044255](assets/image-20231031161044255.png)
+
+![image-20231031161225991](assets/image-20231031161225991.png)
+
+![image-20231031160739020](assets/image-20231031160739020.png)
+
+### 修改requestErrorConfig
+
+![image-20231005160127336](assets/image-20231005160127336.png)
+
+![image-20231005160035130](assets/image-20231005160035130.png)
+
+![image-20231005170916555](assets/image-20231005170916555.png)
+
+![image-20231007102657764](assets/image-20231007102657764.png)
+
+![image-20231007102743482](assets/image-20231007102743482.png)
+
+![image-20231005160150723](assets/image-20231005160150723.png)
+
+![image-20231005160213602](assets/image-20231005160213602.png)
+
