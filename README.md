@@ -796,9 +796,27 @@ public BaseResponse<BIResponse> genChartByAI(@RequestPart("file") MultipartFile 
 
 **1、自动生成后端调用代码**
 
-**2、用户输入**
+**2、创建页面**
 
-![image-20231102203404790](assets/image-20231102203404790.png)
+![image-20231103152845702](assets/image-20231103152845702.png)
+
+**3、添加路由**
+
+![image-20231103153006971](assets/image-20231103153006971.png)
+
+**4、用户输入**
+
+1. 选择组件
+
+![image-20231103145354640](assets/image-20231103145354640.png)
+
+![image-20231103145455990](assets/image-20231103145455990.png)
+
+![image-20231103145518854](assets/image-20231103145518854.png)
+
+2. 引入组件
+
+![image-20231103181144202](assets/image-20231103181144202.png)
 
 ![image-20231102203513905](assets/image-20231102203513905.png)
 
@@ -810,11 +828,77 @@ public BaseResponse<BIResponse> genChartByAI(@RequestPart("file") MultipartFile 
 
 ![image-20231102203751293](assets/image-20231102203751293.png)
 
-**3、图表展示** https://github.com/hustcc/echarts-for-react  https://git.hust.cc/echarts-for-react/
+**4、图表展示** https://github.com/hustcc/echarts-for-react  https://git.hust.cc/echarts-for-react/
 
 ![image-20231102203834196](assets/image-20231102203834196.png)
 
 ![image-20231102202549740](assets/image-20231102202549740.png)
+
+### 个人图表页面
+
+**1.创建页面**
+
+![image-20231103155522380](assets/image-20231103155522380.png)
+
+**2、添加路由**
+
+![image-20231103153629589](assets/image-20231103153629589.png)
+
+**3、获取数据，定义 state 变量来存储数据，用于给页面展示**
+
+![image-20231103172437291](assets/image-20231103172437291.png)
+
+![image-20231103162350923](assets/image-20231103162350923.png)
+
+![image-20231103161951719](assets/image-20231103161951719.png)
+
+**4、选择组件**
+
+![image-20231103162714889](assets/image-20231103162714889.png)
+
+**5、引入组件**
+
+![image-20231103172159876](assets/image-20231103172159876.png)
+
+![image-20231103172331765](assets/image-20231103172331765.png)
+
+![image-20231103173125126](assets/image-20231103173125126.png)
+
+**6、添加分页**
+
+![image-20231103174145626](assets/image-20231103174145626.png)
+
+**7、添加搜索框**
+
+![image-20231103175128062](assets/image-20231103175128062.png)
+
+![image-20231103175103464](assets/image-20231103175103464.png)
+
+**8、设置loading**
+
+![image-20231103180537559](assets/image-20231103180537559.png)
+
+![image-20231103180521767](assets/image-20231103180521767.png)
+
+![image-20231103180604913](assets/image-20231103180604913.png)
+
+![image-20231103180620196](assets/image-20231103180620196.png)
+
+**9、原子化样式**
+
+![image-20231103180738768](assets/image-20231103180738768.png)
+
+![image-20231103180802775](assets/image-20231103180802775.png)
+
+**10、展示**
+
+![image-20231103181323718](assets/image-20231103181323718.png)
+
+**11、扩展点**
+
+支持用户查看原始数据
+
+支持跳转到i图表编辑页，去编辑图表
 
 ## Ant Design Pro踩坑
 
