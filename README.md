@@ -69,6 +69,7 @@ https://chartcube.alipay.com
 - 自动生成增删改查代码
 - 图表管理
 - 智能图表分析
+- 系统优化
 
 **前端**
 
@@ -270,20 +271,21 @@ create table if not exists user
 **图表信息表：**
 
 ```sql
--- 图表信息表
 create table if not exists chart
 (
-    id         bigint auto_increment comment 'id' primary key,
-    goal       text                               null comment '分析目标',
-    rawData    text                               null comment '原始数据',
-    chartType  varchar(128)                       null comment '图表类型',
-    chartName  varchar(128)                       null comment '图表名称',
-    genChart   text                               null comment 'AI生成的图表数据',
-    genSummary text                               null comment 'AI生成的分析总结',
-    userId     bigint                             null comment '创建人id',
-    createTime datetime default CURRENT_TIMESTAMP not null comment '创建时间',
-    updateTime datetime default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP comment '更新时间',
-    isDelete   tinyint  default 0                 not null comment '是否删除'
+    id          bigint auto_increment comment 'id' primary key,
+    goal        text                                   null comment '分析目标',
+    rawData     text                                   null comment '原始数据',
+    chartType   varchar(128)                           null comment '图表类型',
+    chartName   varchar(128)                           null comment '图表名称',
+    genChart    text                                   null comment 'AI生成的图表数据',
+    genSummary  text                                   null comment 'AI生成的分析总结',
+    userId      bigint                                 null comment '创建人id',
+    status      varchar(128) default 'wait'            not null comment 'wait,succeeded,failed,running',
+    execMessage text                                   null comment '执行信息',
+    createTime  datetime     default CURRENT_TIMESTAMP not null comment '创建时间',
+    updateTime  datetime     default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP comment '更新时间',
+    isDelete    tinyint      default 0                 not null comment '是否删除'
 ) comment '图表信息' collate = utf8mb4_unicode_ci;
 ```
 
@@ -739,7 +741,7 @@ ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR, "文件大小超过 1M
 // 校验文件后缀
 String suffix = FileUtil.getSuffix(originalFilename);
 final List<String> validFileSuffix = Arrays.asList("xlsx");
-ThrowUtils.throwIf(validFileSuffix.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀不符合要求");
+ThrowUtils.throwIf(!validFileSuffix.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀不符合要求");
 ```
 
 **扩展点：**
@@ -1050,7 +1052,362 @@ class RedisLimiterManagerTest {
 redisLimiterManager.doRateLimit("genChartByAI_"+loginUser.getId().toString());
 ```
 
+#### 异步化
 
+**应用场景：**调用的服务处理能力有限，或者处理时间比较长，就应该考虑异步化。
+
+**问题分析：**
+
+1. 用户等待AI生成的时间有点长
+2. 服务器可能会有很多请求需要处理，导致系统资源紧张，严重时导致服务器宕机或者无法处理新的请求
+3. 第三方服务（AI能力）的处理能力是有限的，比如每3秒处理1个请求，过多的请求会导致AI处理不过来，严重时 AI 可能会拒绝为后台系统提供服务
+
+**异步：**不用等一件事做完，就可以做另一件事。等第一件事做完，可以收到一个通知，告诉你这件事做完了，你可以再进行后续处理。
+
+**业务流程分析：**
+
+1、标准异步化的业务流程
+
+1. 当用户要进行耗时很长的操作时，点击提交后，不需要在界面干等，而是应该把这个任务保存到数据库，然后添加到任务队列中
+
+2. 添加任务到任务队列时，会有以下情况
+
+   a.有空闲线程，立刻进行该任务
+
+   b.没有空闲线程且任务队列没有满，加入任务队列
+
+   c.没有空闲线程且任务队列已经满
+
+   ​	i . 拒绝任务
+
+   ​	ii . 在有空闲线程或者空闲队列位置时，从数据库中把任务捞出，再去执行
+
+3. 程序（线程）从任务队列取出任务依次执行，每完成一件事情要修改一下任务的状态。
+
+4. 用户可以查询任务的执行状态，或者在任务执行成功或失败时能够得到通知（发邮件，系统消息提示，短信），从而优化体验
+
+5. 如果要执行的任务非常复杂，包含很多环节，在每一个环节完成时，要在程序（数据库）记录一下该环节的执行状态。从而给用户展示任务进度
+
+2、本项目异步化的业务流程
+
+1. 用户点击智能分析页的提交按钮，先把图表立刻保存到数据库中
+2. 用户可以在个人图表页面查看所有图表（已生成，生成中，生成失败）的信息和状态
+3. 用户可以修改生成失败的图表信息，然后点击重新生成
+
+**问题：**
+
+1. 任务队列的最大容量应该设置为多少？
+2. 程序怎么从任务队列中取出任务去执行？
+3. 任务队列的流程怎么实现
+4. 怎么保证程序最多同时执行x个任务
+
+##### **线程池**
+
+`为什么需要线程池？`
+
+1. 线程的管理比较复杂（比如什么时候新增线程，什么时候减少空闲线程）
+2. 任务存取比较复杂（什么时侯比较复杂，什么时候拒绝任务，怎么保证各个线程不抢到用一个任务）
+
+`线程池作用：`帮助你轻松管理线程，协调任务的执行过程
+
+`线程池实现：`
+
+1. 在Spring中，可以用 ThreadPoolTaskExecutor ，配合 @Async 注解来实现（不太建议）
+2. 在Java中，可以使用 JUC 并发编程包中的 ThreadPoolExecutor 来实现非常灵活地自定义线程池
+
+`线程池参数：`
+
+```java
+public ThreadPoolExecutor(int corePoolSize,
+                          int maximumPoolSize,
+                          long keepAliveTime,
+                          TimeUnit unit,
+                          BlockingQueue<Runnable> workQueue,
+                          ThreadFactory threadFactory,
+                          RejectedExecutionHandler handler) 
+```
+
+corePoolSize（核心线程数 ）：正常情况下，我们的系统应该能同时工作的线程数（随时就绪的状态）
+maximumPoolSize（最大线程数 ）：极限情况下，我们的线程池最多有多少个线程？
+keepAliveTime（空闲线程存活时间）：非核心线程在没有任务的情况下，过多久要删除（理解为开除临时工），从而释放无用的线程资源。
+TimeUnit unit（空闲线程存活时间的单位）：分钟、秒
+workQueue（工作队列）：用于存放给线程执行的任务，存在一个队列的长度（一定要设置，不要说队列长度无限，因为也会占用资源）
+threadFactory（线程工厂）：控制每个线程的生成、线程的属性（比如线程名）
+RejectedExecutionHandler（拒绝策略）：任务队列满的时候，我们采取什么措施，比如抛异常、不抛异常、自定义策略
+
+资源隔离策略：比如重要的任务（VIP 任务）一个队列，普通任务一个队列，保证这两个队列互不干扰。
+
+`线程池工作机制`
+
+1. 刚开始没有任何的线程，也没有任何的任务
+
+![image-20231104144503719](assets/image-20231104144503719.png)
+
+2. 来了一个任务，发现我们的员工还没有达到正式员工数（corePoolSize = 2），来一个员工直接处理这个任务
+
+![image-20231104144708541](assets/image-20231104144708541.png)
+
+3. 又来了一个任务，发现我们的员工还没有达到正式员工数（corePoolSize = 2），再来一个员工直接处理这个任务
+
+![image-20231104144914128](assets/image-20231104144914128.png)
+
+4. 又来了一个任务，但是我们正式员工数已经满了（当前线程数 = corePoolSize = 2），任务放到队列（最大长度 workQueue.size = 2）里等待，而不是再加新员工。
+
+![image-20231104145032949](assets/image-20231104145032949.png)
+
+5. 又来了一个任务，但是我们的任务队列已经满了（当前线程数 > corePoolSize = 2，已有任务数 = 最大长度 workQueue.size = 2），新增线程（maximumPoolSize = 4）来处理新任务，而不是丢弃任务
+
+![image-20231104145154625](assets/image-20231104145154625.png)
+
+6. 已经到了任务 7，但是我们的任务队列已经满了、临时工也招满了（当前线程数 = maximumPoolSize = 4，已有任务数 = 最大长度 workQueue.size = 2），调用 RejectedExecutionHandler 拒绝策略来处理多余的任务。
+
+![image-20231104145250349](assets/image-20231104145250349.png)
+
+7. 如果当前线程数超过 corePoolSize（正式员工数），又没有新的任务给他，那么等 keepAliveTime 时间达到后，就可以把这个线程释放。
+
+`线程池参数如何设置？`
+
+结合实际情况（实际业务场景和系统资源）来测试调整，不断优化。 
+
+回归到我们的业务，要考虑系统最脆弱的环节（木桶效应）在哪？
+
+现有条件：假设AI能力的并发是只允许 4 个线程同时去执行，只允许20个任务排队
+
+corePoolSize（核心线程数 => 正式员工数）：正常情况下，可以设置为 2 - 4 
+maximumPoolSize：设置为极限情况，设置为 <= 4
+keepAliveTime（空闲线程存活时间）：一般设置为秒级或者分钟级
+TimeUnit unit（空闲线程存活时间的单位）：分钟、秒
+workQueue（工作队列）：结合实际请况去设置，可以设置为 20
+threadFactory（线程工厂）：控制每个线程的生成、线程的属性（比如线程名）
+RejectedExecutionHandler（拒绝策略）：抛异常，标记数据库的任务状态为 “任务满了已拒绝”
+
+一般情况下，任务分为 IO 密集型和计算密集型两种。
+计算密集型：吃 CPU，比如音视频处理、图像处理、数学计算等，一般是设置 corePoolSize 为 CPU 的核数 + 1（空余线程），可以让每个线程都能利用好 CPU 的每个核，而且线程之间不用频繁切换（减少打架、减少开销）
+IO 密集型：吃带宽/内存/硬盘的读写资源，corePoolSize 可以设置大一点，一般经验值是 2n 左右，但是建议以 IO 的能力为主。
+
+考虑导入百万数据到数据库，属于 IO 密集型任务、还是计算密集型任务？
+
+`自定义线程池`
+
+```java
+@Configuration
+public class ThreadPoolExecutorConfig {
+
+
+    @Bean
+    public ThreadPoolExecutor threadPoolExecutor() {
+        ThreadFactory threadFactory = new ThreadFactory() {
+            private int count = 1;
+
+            @Override
+            public Thread newThread(@NotNull Runnable r) {
+                Thread thread = new Thread(r);
+                thread.setName("线程" + count);
+                count++;
+                return thread;
+            }
+        };
+        return new ThreadPoolExecutor(2, 4, 100, TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(4), threadFactory, new ThreadPoolExecutor.AbortPolicy());
+    }
+}
+```
+
+`提交任务&查看线程池信息`
+
+```java
+/**
+ * 任务队列模拟
+ */
+@RestController
+@RequestMapping("/queue")
+@Slf4j
+@Profile({"dev","local"})
+public class QueueController {
+    @Resource
+    private ThreadPoolExecutor threadPoolExecutor;
+    
+    //提交任务
+    @GetMapping("/add")
+    public void add(String name) {
+        CompletableFuture.runAsync(() -> {
+            System.out.println("任务执行中：" + name+",执行人："+Thread.currentThread().getName());
+            try {
+                Thread.sleep(600000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }, threadPoolExecutor);
+    }
+    
+    //查看线程池信息
+    @GetMapping("/get")
+    public Map<String, Object> get(){
+        Map<String,Object> map = new HashMap<>();
+        int size = threadPoolExecutor.getQueue().size();
+        long taskCount = threadPoolExecutor.getTaskCount();
+        long completedTaskCount = threadPoolExecutor.getCompletedTaskCount();
+        long activeCount = threadPoolExecutor.getActiveCount();
+        map.put("队列长度",size);
+        map.put("任务总数",taskCount);
+        map.put("已成功执行的任务数",taskCount);
+        map.put("正在工作的线程数",activeCount);
+        return map;
+    }
+}
+```
+
+使用接口文档提交任务&查看线程池信息来理解线程池的工作机制
+
+##### 开发
+
+`实现工作流程`
+
+1. 给chart表新增任务状态字段（比如排队中，已完成，执行中，失败）、执行信息字段（可以记录任务失败的原因等）
+
+```sql
+create table if not exists chart
+(
+    id          bigint auto_increment comment 'id' primary key,
+    goal        text                                   null comment '分析目标',
+    rawData     text                                   null comment '原始数据',
+    chartType   varchar(128)                           null comment '图表类型',
+    chartName   varchar(128)                           null comment '图表名称',
+    genChart    text                                   null comment 'AI生成的图表数据',
+    genSummary  text                                   null comment 'AI生成的分析总结',
+    userId      bigint                                 null comment '创建人id',
+    status      varchar(128) default 'wait'            not null comment 'wait,succeeded,failed,running',
+    execMessage text                                   null comment '执行信息',
+    createTime  datetime     default CURRENT_TIMESTAMP not null comment '创建时间',
+    updateTime  datetime     default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP comment '更新时间',
+    isDelete    tinyint      default 0                 not null comment '是否删除'
+) comment '图表信息' collate = utf8mb4_unicode_ci;
+```
+
+2. 用户点击智能分析页的提交按钮，先把图表立刻保存到数据库中，然后提交任务
+
+3. 任务：先修改图表的任务状态为“执行中”；等执行成功后，修改为“已完成”，保存执行结果；执行失败后，修改为失败，记录失败信息
+
+```java
+/**
+ * 智能分析（异步）
+ *
+ * @param multipartFile
+ * @param genChartRequest
+ * @param request
+ * @return
+ */
+@PostMapping("/gen")
+public BaseResponse<BIResponse> genChartByAI(@RequestPart("file") MultipartFile multipartFile,
+                                             GenChartRequest genChartRequest, HttpServletRequest request) {
+    String goal = genChartRequest.getGoal();
+    String chartType = genChartRequest.getChartType();
+    String chartName = genChartRequest.getChartName();
+    // 拼接分析目标
+    if (StringUtils.isNotBlank(chartType)) {
+        goal = goal + "，请使用" + chartType;
+    }
+    // 校验参数
+    ThrowUtils.throwIf(StringUtils.isBlank(goal), ErrorCode.PARAMS_ERROR, "分析目标为空");
+    ThrowUtils.throwIf(StringUtils.isNotBlank(chartName) && chartName.length() > 128, ErrorCode.PARAMS_ERROR, "图表名称过长");
+    // 校验文件
+    long size = multipartFile.getSize();
+    String originalFilename = multipartFile.getOriginalFilename();
+    // 校验文件大小
+    final long ONE_MB = 1024 * 1024L;
+    ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR, "文件大小超过 1M");
+    // 校验文件后缀
+    String suffix = FileUtil.getSuffix(originalFilename);
+    final List<String> validFileSuffix = Arrays.asList("xlsx");
+    ThrowUtils.throwIf(!validFileSuffix.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀不符合要求");
+    // 获取登录用户
+    User loginUser = userService.getLoginUser(request);
+    // 限流,每个用户一个限流器
+    redisLimiterManager.doRateLimit("genChartByAI_" + loginUser.getId().toString());
+    // 压缩原始数据
+    String data = ExcelUtils.excelToCsv(multipartFile);
+    // 构造用户请求（分析目标，图表名称，图表类型，csv数据）
+    StringBuilder userInput = new StringBuilder();
+    userInput.append("分析需求：").append("\n");
+    userInput.append(goal).append("\n");
+    userInput.append("原始数据：").append("\n");
+    userInput.append(data).append("\n");
+    // 插入数据库
+    Chart chart = new Chart();
+    chart.setGoal(goal);
+    chart.setRawData(data);
+    chart.setChartType(chartType);
+    chart.setChartName(chartName);
+    chart.setUserId(loginUser.getId());
+    chart.setStatus("wait");
+    boolean save = chartService.save(chart);
+    ThrowUtils.throwIf(!save, ErrorCode.SYSTEM_ERROR, "图表保存失败");
+    //todo 处理任务队列满了后，抛异常的情况
+    CompletableFuture.runAsync(() -> {
+        //先修改图表的任务状态为“执行中”；等执行成功后，修改为“已完成”，保存执行结果；执行失败后，修改为失败，记录失败信息
+        //修改任务状态为执行中，减少重复执行的风险、同时让用户知晓执行状态
+        Chart updateChart = new Chart();
+        updateChart.setId(chart.getId());
+        updateChart.setStatus("running");
+        boolean result = chartService.updateById(updateChart);
+        if (!result) {
+            handleChartUpdateError(chart.getId(),"更新图表执行中状态失败");
+            return;
+        }
+        // 调用鱼聪明SDK，得到响应
+        long biModelId = 1719916921023344642L;
+        String answer = aiManager.doChat(biModelId, userInput.toString());
+        // 从AI响应结果中，取出需要的数据
+        String[] splits = answer.split("【【【【【");
+        if (splits.length < 3) {
+            handleChartUpdateError(chart.getId(),"AI生成错误");
+            return;
+        }
+        String genChart = splits[1].trim();
+        String genSummary = splits[2].trim();
+        //执行成功
+        Chart updateChartResult = new Chart();
+        updateChartResult.setId(chart.getId());
+        //todo 建议定义状态为枚举值
+        updateChartResult.setStatus("succeeded");
+        updateChartResult.setGenChart(genChart);
+        updateChartResult.setGenSummary(genSummary);
+        result = chartService.updateById(updateChartResult);
+        if (!result) {
+            handleChartUpdateError(chart.getId(),"更新图表已完成状态失败");
+            return;
+        }
+    },threadPoolExecutor);
+    // 返回给前端
+    BIResponse biResponse = new BIResponse();
+    biResponse.setChartId(chart.getId());
+    return ResultUtils.success(biResponse);
+}
+private void handleChartUpdateError(long chartId, String execMessage) {
+    Chart updateChart = new Chart();
+    updateChart.setId(chartId);
+    updateChart.setStatus("failed");
+    updateChart.setExecMessage(execMessage);
+    boolean result = chartService.updateById(updateChart);
+    if (!result) {
+        log.error("更新图表失败状态失败，" + chartId + "，" + execMessage);
+    }
+}
+```
+
+4. 用户可以在个人图表页面查看所有图表（已生成，生成中，生成失败）的信息和状态（修改个人图表页面）
+
+5. 用户可以修改生成失败的图表信息，然后点击重新生成（暂未完成）
+
+##### 优化点
+
+1. guava retrying 重试
+2. 提前考虑到AI生成错误的情况，在后端进行异常处理（比如AI生成了多余的内容，提取正确的内容）
+3. 如果说任务根本没提交到队列中（或者队列满了），可以使用定时任务把失败状态的图表放到队列中	
+4. 建议给任务的执行增加一个超时时间，超时后自动标记为失败 
+5. 反向压力https://zhuanlan.zhihu.com/p/404993753 判断第三方服务的状态来选择当前系统的策略（比如根据AI服务的当前任务队列来控制我们系统的核心线程数），最大化利用系统资源
+6. 个人图表页面增加一个刷新按钮或定时自动刷新，保证获取到图表的最新状态（前端轮询）
+7. 任务执行成功或失败给用户发送消息通知
 
 ## 前端
 
@@ -1211,6 +1568,8 @@ redisLimiterManager.doRateLimit("genChartByAI_"+loginUser.getId().toString());
 
 ![image-20231103162350923](assets/image-20231103162350923.png)
 
+![image-20231104131721650](assets/image-20231104131721650.png)
+
 ![image-20231103161951719](assets/image-20231103161951719.png)
 
 **4、选择组件**
@@ -1260,6 +1619,44 @@ redisLimiterManager.doRateLimit("genChartByAI_"+loginUser.getId().toString());
 支持用户查看原始数据
 
 支持跳转到i图表编辑页，去编辑图表
+
+**12、修改页面，补充错误处理**
+
+![image-20231104171643817](assets/image-20231104171643817.png)
+
+![image-20231104171524857](assets/image-20231104171524857.png)
+
+![image-20231104171553609](assets/image-20231104171553609.png)
+
+![image-20231104172425764](assets/image-20231104172425764.png)
+
+![image-20231104172450541](assets/image-20231104172450541.png)
+
+![image-20231104172205864](assets/image-20231104172205864.png)
+
+![image-20231104172216748](assets/image-20231104172216748.png)
+
+### 智能图表异步分析页面
+
+**添加路由**
+
+![image-20231104172713809](assets/image-20231104172713809.png)
+
+**创建页面**
+
+![image-20231104164128546](assets/image-20231104164128546.png)
+
+**修改页面**
+
+![image-20231104164254448](assets/image-20231104164254448.png)
+
+![image-20231104164327356](assets/image-20231104164327356.png)
+
+![image-20231104165742419](assets/image-20231104165742419.png)
+
+![image-20231104165822210](assets/image-20231104165822210.png)
+
+![image-20231104165837769](assets/image-20231104165837769.png)
 
 ## Ant Design Pro踩坑
 
