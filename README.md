@@ -77,7 +77,7 @@ https://chartcube.alipay.com
 
 - 登录注册页面
 - 智能图表分析页面
-- 图表管理页面
+- 个人图表页面
 
 ## 初始化
 
@@ -628,6 +628,31 @@ public class ExcelUtils {
 ```
 
 ```java
+@Service
+public class AIManager {
+    @Resource
+    private YuCongMingClient yuCongMingClient;
+
+    /**
+     *
+     * @param modelId
+     * @param message
+     * @return
+     */
+    public String doChat(long modelId,String message){
+        DevChatRequest devChatRequest = new DevChatRequest();
+        devChatRequest.setModelId(modelId);
+        devChatRequest.setMessage(message);
+        BaseResponse<DevChatResponse> response = yuCongMingClient.doChat(devChatRequest);
+        if (response==null){
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"AI响应错误");
+        }
+        return response.getData().getContent();
+    }
+}
+```
+
+```java
 /**
  * 智能分析
  *
@@ -690,6 +715,342 @@ public BaseResponse<BIResponse> genChartByAI(@RequestPart("file") MultipartFile 
 ```
 
 ![image-20231102135109277](assets/image-20231102135109277.png)
+
+### 系统优化
+
+#### 安全性
+
+**问题：**如果用户上传一个超大的文件怎么办？比如1000G
+
+**解决：**只要涉及到用户自主上传的操作，一定要校验文件
+
+- 文件的大小
+- 文件的后缀
+- 文件的内容（成本高一些）
+- 文件的合法性（不能有敏感的内容，建议用第三方的审核功能，不要自己写）
+
+```java
+// 校验文件
+long size = multipartFile.getSize();
+String originalFilename = multipartFile.getOriginalFilename();
+// 校验文件大小
+final long ONE_MB = 1024 * 1024L;
+ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR, "文件大小超过 1M");
+// 校验文件后缀
+String suffix = FileUtil.getSuffix(originalFilename);
+final List<String> validFileSuffix = Arrays.asList("xlsx");
+ThrowUtils.throwIf(validFileSuffix.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀不符合要求");
+```
+
+**扩展点：**
+
+接入腾讯云的图片万象数据审核（COS对象存储的审核功能）
+
+
+
+#### 数据存储
+
+**现状：**我们把每个图表的原始数据存放在了同一个数据表（chart表）的字段里
+
+**问题：**
+
+1. 如果用户日益增多，那么图表数也会增多，再如果用户上传的图表原始数据量很大，就会造成单表体积很大，查询也会变慢
+2. 对于 BI 平台，用户是有查看原始数据，对原始数据进行简单查询的需求的。现在如果把所有数据存放在一个字段中，查询时，只能取这个字段的所有数据
+
+**解决：**
+
+1. 把每个图表对应的原始数据单独保存为一个新的数据表，而不是都存在一个字段里
+
+![image-20231104095152123](assets/image-20231104095152123.png)
+
+**好处：**
+
+1. 存储时，分开存储，互不影响（也能增加安全性，防止恶意用户上传大文件，影响其他用户体验）
+2. 查询时，可以使用sql语句灵活取出需要的字段，查询性能更快
+
+**实现：**
+
+分开存储：
+
+1. 存储图表信息时，不把图表数据存储在一个字段，而是新建一个 chart_{图表id} 的数据表
+
+通过图表id，数据列名，数据类型等字段，生成以下sql语句，并且执行即可
+
+```sql
+create table chart_1720380873253691394
+(
+    日期  varchar(128) null,
+    用户数 int          null
+);
+```
+
+分开查询：
+
+1. 以前直接查询图表，取chartData字段；现在改为读取chart_{图表id}的数据表
+
+```sql
+select * from chart_1720380873253691394
+```
+
+**具体实现：Mybatis的动态SQL**
+
+1、想清楚哪些是需要动态替换的，比如查询的数据表名chart_1720380873253691394 
+
+2、在mapper.xml中定义sql语句
+
+该方式最灵活，但需要小心sql注入
+
+```sql
+<select id="queryChartData" parameterType="string" resultType="map">
+    ${querySql}
+</select>
+```
+
+3、在mapper类中添加方法
+
+```java
+public interface ChartMapper extends BaseMapper<Chart> {
+    List<Map<String, Object>> queryChartData(@Param("querySql") String querySql);
+}
+```
+
+4、测试调用
+
+```java
+@SpringBootTest
+class ChartMapperTest {
+    @Resource
+    private ChartMapper chartMapper;
+
+    @Test
+    void queryChartData() {
+        long chartId = 1720380873253691394L;
+        String querySql = String.format("select * from chart_%s", chartId);
+        List<Map<String, Object>> resultData = chartMapper.queryChartData(querySql);
+        System.out.println(resultData);
+
+    }
+}
+```
+
+5、结果
+
+![image-20231104103300734](assets/image-20231104103300734.png)
+
+**分库分表：**
+
+1. 水平分表 （根据一定的规则，把一张表的数据划分到不同的物理存储位置上）
+2. 垂直分库 （根据业务，比如订单数据库，商品数据库）
+
+#### 限流
+
+**问题：**使用系统是需要消耗成本的，用户有可能疯狂刷量，让你破产
+
+**解决：**
+
+1、限制用户调用总次数，控制成本
+
+2、用户在短时间内疯狂使用，导致服务器资源被占满，其他用户无法使用 => 限流，限制单位时间内请求数
+
+**思考限流阈值：**
+
+1. 参考正常用户的使用频率，比如单个用户每秒只能调用一次
+
+**限流的几种算法：**[面试必备：4种经典限流算法讲解 - 掘金 (juejin.cn)](https://juejin.cn/post/6967742960540581918)
+
+**1、固定窗口限流**
+
+单位时间内允许部分操作：比如1小时只允许10个用户操作
+
+优点：简单
+
+缺点：可能出现流量突刺，比如前59分钟没有一个操作，第59分钟来了10个操作，第1小时01分钟来了10个操作。相当于2分钟执行了20个操作，服务器可能承受不住就崩了
+
+**2、滑动窗口限流**
+
+单位时间内允许部分操作，但是这个单位时间是滑动的，需要指定一个滑动单位，即多少单位时间滑动一次
+
+比如滑动单位：1min
+
+0h      1h         2h
+
+过了1min
+
+1min  - 1h1min
+
+优点：能够解决上述流量突刺问题，因为第59分钟时，限流窗口是59分 -  1小时59分，这个窗口内只能接受10次请求，只要还在这个窗口内，更多的操作就会被拒绝
+
+缺点：实现相对复杂，限流效果和滑动单位有关，滑动单位越小，限流效果越好，但往往很难选取到一个合适的滑动单位
+
+**3、漏桶限流**（推荐）
+
+以固定的速率处理请求，当请求通满了，拒绝请求
+
+假设桶的容量是10，每秒能处理10个请求，每0.1秒固定处理一次请求，如果1秒内来了10个请求，可以处理完。但1秒内来了11个请求，最后哪个请求会溢出桶，被拒绝
+
+优点：能够一定程度上应对流量突刺，固定速率处理请求，保证服务器的安全
+
+缺点：没有办法迅速处理	一批请求，只能一个一个按顺序来处理
+
+**4、令牌桶限流**（推荐）
+
+管理员生成一批令牌，每秒生成10个令牌；用户操作前，先去拿到一个令牌，有令牌的人就有资格执行操作，能同时执行操作。拿不到令牌就等着
+
+优点：能够并发处理同时的请求
+
+需要考虑的问题：还是存在时间单位选取问题
+
+**限流粒度：**
+
+1. 针对某个方法限流，即单位时间内最多允许同时 xx 个操作使用该方法
+2. 针对某个用户限流，即单位时间内最多执行 xx 个操作
+3. 针对某个用户某个方法限流，
+
+**限流实现：**
+
+**1、本地限流（单机限流）**
+
+一般适用于只有一个服务器的项目（单体项目），如果有多台服务器，会存在服务器之间统计数据不一致的问题，比如调用次数不一致
+
+第三方库：Guava RateLimiter
+
+
+
+**2、分布式限流（多机限流，微服务项目）**
+
+1、把用户使用频率等数据放到一个集中存储去统计，比如使用Redis，这样无论用户请求落到哪台服务器，都已集中存储中的数据为准(Redisson)
+
+2、在网关集中进行限流和统计（Sentinel，Spring Cloud Gateway)
+
+**Redisson限流实现**     https://github.com/redisson/redisson#quick-start
+
+Redisson内置了一个限流工具类，可以帮助你利用Redis来存储，统计
+
+1. 引入依赖
+
+```xml
+<dependency>
+   <groupId>org.redisson</groupId>
+   <artifactId>redisson</artifactId>
+   <version>3.24.3</version>
+</dependency>  
+```
+
+2. 创建客户端
+
+```java
+@Configuration
+@ConfigurationProperties(prefix = "spring.redis")
+@Data
+public class RedissonConfig {
+    private Integer dataBase;
+    private String host;
+    private Integer port;
+    private String password;
+
+    @Bean
+    public RedissonClient redissonClient() {
+        Config config = new Config();
+        config.useSingleServer()
+                .setDatabase(dataBase)
+                .setAddress("redis://"+host+":"+port)
+                .setPassword(password);
+        RedissonClient redisson = Redisson.create(config);
+        return redisson;
+    }
+}
+```
+
+3. RedisLimiterManager
+
+   什么是Manager?专门提供RedisLimiter 限流基础服务的（提供了通用的能力）
+
+```java
+@Service
+public class RedisLimiterManager {
+    @Resource
+    private RedissonClient redissonClient;
+
+    /**
+     * 限流操作
+     * @param key 区分不同的限流器，比如不同的用户Id，应该分别统计
+     */
+    public void doRateLimit(String key){
+        RRateLimiter rateLimiter = redissonClient.getRateLimiter(key);
+        rateLimiter.trySetRate(RateType.OVERALL,2, 1,RateIntervalUnit.SECONDS);
+        //每当一个操作来了后，请求一个令牌
+        boolean canOp = rateLimiter.tryAcquire(1);
+        if(!canOp) {
+            throw new BusinessException(ErrorCode.TOO_MANY_REQUEST);
+        }
+    }
+}
+```
+
+看不到方法参数怎么办？
+
+![image-20231104114523283](assets/image-20231104114523283.png)
+
+1、看文档
+
+2、下载源码：点进任意一个包的代码，点击download source下载
+
+![image-20231104114723886](assets/image-20231104114723886.png)
+
+4. 测试调用
+
+```java
+@SpringBootTest
+class RedisLimiterManagerTest {
+    @Resource
+    private RedisLimiterManager redisLimiterManager;
+
+    @Test
+    void doRateLimit() {
+        String userId = "1";
+        //一秒请求5次	
+        for (int i = 0; i < 5; i++) {
+            redisLimiterManager.doRateLimit(userId);
+            System.out.println("成功");
+        }
+    }
+}
+```
+
+![image-20231104115544690](assets/image-20231104115544690.png)
+
+```java
+@SpringBootTest
+class RedisLimiterManagerTest {
+    @Resource
+    private RedisLimiterManager redisLimiterManager;
+
+    @Test
+    void doRateLimit() throws InterruptedException {
+        String userId = "1";
+        for (int i = 0; i < 2; i++) {
+            redisLimiterManager.doRateLimit(userId);
+            System.out.println("成功");
+        }
+        Thread.sleep(1000);
+        for (int i = 0; i < 5; i++) {
+            redisLimiterManager.doRateLimit(userId);
+            System.out.println("成功");
+        }
+    }
+}
+```
+
+![image-20231104115915513](assets/image-20231104115915513.png)
+
+5. 应用
+
+```java
+// 限流,每个用户一个限流器
+redisLimiterManager.doRateLimit("genChartByAI_"+loginUser.getId().toString());
+```
+
+
 
 ## 前端
 
