@@ -70,6 +70,12 @@ https://chartcube.alipay.com
 - 图表管理
 - 智能图表分析
 - 系统优化
+  - 安全性
+  - 数据存储
+  - 限流
+  - 异步化
+
+- 分布式消息队列
 
 **前端**
 
@@ -1408,6 +1414,1578 @@ private void handleChartUpdateError(long chartId, String execMessage) {
 5. 反向压力https://zhuanlan.zhihu.com/p/404993753 判断第三方服务的状态来选择当前系统的策略（比如根据AI服务的当前任务队列来控制我们系统的核心线程数），最大化利用系统资源
 6. 个人图表页面增加一个刷新按钮或定时自动刷新，保证获取到图表的最新状态（前端轮询）
 7. 任务执行成功或失败给用户发送消息通知
+
+
+
+
+
+### 分布式消息队列
+
+#### 分析系统现状的不足
+
+> 单机系统的问题
+
+**1、无法集中限制，只能单机限制**
+
+已经经过了同步到异步的改造。目前的异步是通过本地的线程池实现的。
+
+假如AI服务限制只能有2个用户同时使用，可以设置线程池核心线程数为2来实现
+
+假设系统用量增大，改为分布式，多台服务器，每个服务器都要有2个线程，就可能有2N个线程
+
+
+
+解决方案：在一个集中的地方去管理下发任务（比如集中存储当前正在执行的任务数）
+
+
+
+**2、任务放在内存中（ArrayBlockingQueue）执行的，可能会丢失**
+
+虽然可以人工从数据库捞出来再重试，但是需要额外开发（比如定时任务），这种重试的场景是非常典型的，其实是不需要开发者过于关心、或者自己实现的
+
+
+
+解决方案：把任务放在一个可以持久化存储的硬盘中
+
+
+
+**3、如果随着系统功能增多，长耗时任务也越来越多，系统就会越来越复杂（比如要开多个线程池，资源可能会出现抢占）**
+
+服务拆分（应用解耦）：可以把长耗时，消耗很多的任务单独抽成一个程序，不要影响主页务
+
+
+
+解决方案：可以有一个中间人，让中间人帮我们去连接两个系统（比如核心系统和智能分析业务）
+
+
+
+#### 中间件
+
+连接多个系统，帮助多个系统紧密协作的技术（组件）
+
+比如：Redis、消息队列，分布式存储 Etcd
+
+
+
+#### 消息队列
+
+存放消息的队列，可以理解为特殊的数据库
+
+关键词：存储，消息，队列
+
+存储：存数据
+
+消息：某种数据结构，比如字符串，对象，二进制数据，json等等
+
+队列：先进先出的数据结构
+
+应用场景（作用）：在多个不同的系统，应用之间实现消息的传输。不需要考虑应用的编程语言、系统、框架等。
+
+​	比如可以让Java应用发消息，php应用收消息，这样就不用把所有代码写到同一个项目里（应用解耦）
+
+##### 消息队列的模型
+
+生产者：Producer
+
+消费者：Comsumer
+
+消息：Message
+
+消息队列：Queue
+
+为什么不直接传输，要用消息队列？
+
+使用消息队列，生产者不用关心消费者要不要消费，什么时候消费，只需要把产品给消息队列，生成者的工作就完成了。
+
+消费者什么时候有空就去消费，这样生产者和消费者就实现类解耦，互不影响。
+
+![image-20231104190110168](assets/image-20231104190110168.png)
+
+##### 为什么要用消息队列？
+
+1）异步处理
+生产者发送完消息之后，可以继续去忙别的，消费者想什么时候消费都可以，不会产生阻塞。
+2）削峰填谷
+先把用户的请求放到消息队列中，消费者（实际执行操作的应用）可以按照自己的需求，慢慢去取。
+原本：12 点时来了 10 万个请求，原本情况下，10万个请求都在系统内部立刻处理，很快系统压力过大就宕机了。
+现在：把这 10万个请求放到消息队列中，处理系统以自己的恒定速率（比如每秒 1 个）慢慢执行，从而保护系统、稳定处理。
+
+分布式消息队列的优势
+1、数据持久化：它可以把消息集中存储到硬盘里，服务器重启就不会丢失
+2、可扩展性：可以根据需求，随时增加（或减少）节点，继续保持稳定的服务
+3、应用解耦：可以连接各个不同语言、框架开发的系统，让这些系统能够灵活传输读取数据
+
+应用解耦的优点：
+
+以前，把所有功能放到同一个项目中，调用多个子功能时，一个环节错，系统就整体出错：
+
+![image-20231104190746826](assets/image-20231104190746826.png)
+
+使用消息队列进行解耦：
+
+1. 一个系统挂了，不影响另一个系统
+2. 系统挂了并恢复后，仍然可以取出消息，继续执行业务逻辑
+3. 只要发送消息到队列，就可以立刻返回，不用同步调用所有系统，性能更高
+
+![image-20231104190910228](assets/image-20231104190910228.png)
+
+4、发布订阅
+
+如果一个非常大的系统要给其他子系统发送通知，最简单直接的方式是大系统直接依次调用小系统：
+问题：
+
+1. 每次发通知都要调用很多系统，很麻烦、有可能失败
+2. 新出现的项目（或者说大项目感知不到的项目）无法得到通知
+
+![image-20231104191315894](assets/image-20231104191315894.png)
+
+解决方案：大的核心系统始终往一个地方（消息队列）去发消息，其他的系统都去订阅这个消息队列（读取这个消息队列中的消息）
+
+![image-20231104191514495](assets/image-20231104191514495.png)
+
+##### 应用场景
+
+1. 耗时的场景（异步）
+2. 高并发场景（异步、削峰填谷）
+3. 分布式系统协作（尤其是跨团队、跨业务协作，应用解耦）
+4. 强稳定性的场景（比如金融业务，持久化、可靠性、削峰填谷）
+
+##### 消息队列的缺点
+要给系统引入额外的中间件，系统会更复杂、额外维护中间件、额外的费用（部署）成本
+消息队列：消息丢失、顺序性、重复消费、数据的一致性（分布式系统就要考虑）
+
+
+
+####  主流分布式消息队列选型
+**主流技术**
+
+1. activemq
+2. rabbitmq
+3. kafka
+4. rocketmq
+5. zeromq
+6. pulsar（云原生）
+7. Apache InLong（Tube）
+
+**技术对比**
+技术选型指标：
+
+- 吞吐量：IO、并发
+- 时效性：类似延迟，消息的发送、到达时间
+- 可用性：系统可用的比率（比如 1 年 365 天宕机 1s，可用率大概 X 个 9）
+- 可靠性：消息不丢失（比如不丢失订单）、功能正常完成 
+
+| 技术名称 | 吞吐量 | 时效性         | 可用性 | 可靠性 | 优势                                                       | 应用场景                                                     |
+| -------- | :----: | -------------- | ------ | ------ | ---------------------------------------------------------- | ------------------------------------------------------------ |
+| activemq |  万级  | 高             | 高     | 高     | 简单易学                                                   | 中小型企业、项目                                             |
+| rabbitmq |  万级  | 极高（微秒）   | 高     | 高     | 生态好（基本什么语言都支持）、时效性高、易学               | 适合绝大多数分布式的应用，这也是先学他的原因                 |
+| kafka    | 十万级 | 高（毫秒以内） | 极高   | 极高   | 吞吐量大、可靠性、可用性，强大的数据流处理能力             | 适用于 大规模处理数据的场景，比如构建日志收集系统、实时数据流传输、事件流收集传输 |
+| rocketmq | 十万级 | 高（ms）       | 极高   | 极高   | 吞吐量大、可靠性、可用性，可扩展性                         | 适用于 金融 、电商等对可靠性要求较高的场景，适合 大规模 的消息处理。 |
+| pulsar   | 十万级 | 高（ms）       | 极高   | 极高   | 可靠性、可用性很高，基于发布订阅模型，新兴（技术架构先进） | 适合大规模、高并发的分布式系统（云原生）。适合实时分析、事件流处理、IoT 数据处理等。 |
+
+#### RabbitMQ 入门实战
+特点：生态好，好学习、易于理解，时效性强，支持很多不同语言的客户端，扩展性、可用性都很不错。
+学习性价比非常高的消息队列，适用于绝大多数中小规模分布式系统。
+
+官方网站：https://www.rabbitmq.com
+
+官方文档：https://www.rabbitmq.com/getstarted.html
+
+##### 基本概念
+AMQP 协议：https://www.rabbitmq.com/tutorials/amqp-concepts.html
+高级消息队列协议（Advanced Message Queue Protocol）
+
+生产者：发消息到某个交换机
+消费者：从某个队列中取消息
+交换机（Exchange）：负责把消息 **转发** 到对应的队列
+队列（Queue）：存储消息的
+路由（Routes）：转发，就是怎么把消息从一个地方转到另一个地方（比如从生产者转发到某个队列）
+
+![image-20231104193315241](assets/image-20231104193315241.png)
+
+
+
+##### 安装
+快速开始：https://www.rabbitmq.com/#getstarted
+windows 安装：https://www.rabbitmq.com/install-windows.html
+
+![image-20231104193849935](assets/image-20231104193849935.png)
+
+先安装 erlang 25.3.2（因为 RabbitMQ 依赖 erlang），这个语言的性能非常高。
+erlang 下载：https://www.erlang.org/patches/otp-25.3.2
+
+![image-20231104194202112](assets/image-20231104194202112.png)
+
+安装完 erlang 后，安装 rabbitmq 即可。
+
+![image-20231104194427297](assets/image-20231104194427297.png)
+
+![image-20231104194826351](assets/image-20231104194826351.png)
+
+win+ r 输入 services.msc打开服务菜单，查看 rabbitmq 服务是否已启动：
+
+![image-20231104195056779](assets/image-20231104195056779.png)
+
+![image-20231105092129185](assets/image-20231105092129185.png)
+
+安装 rabbitmq 监控面板：https://www.rabbitmq.com/rabbitmq-plugins.8.html
+
+在 rabbitmq 安装目录的 sbin 中执行下述脚本：
+
+```sh
+rabbitmq-plugins enable rabbitmq_shovel rabbitmq_management
+```
+
+![image-20231104195422486](assets/image-20231104195422486.png)
+
+![image-20231104195630794](assets/image-20231104195630794.png)
+
+输入以下信息：
+
+访问：http://localhost:15672，用户名密码都是 guest
+
+![image-20231104195729280](assets/image-20231104195729280.png)
+
+![image-20231104195743693](assets/image-20231104195743693.png)
+
+如果想要在远程服务器安装访问 rabbitmq 管理面板，你要自己创建一个管理员账号，不能用默认的 guest，否则会被拦截（官方出于安全考虑）。
+
+如果被拦截，可以自己创建管理员用户：
+参考文档的 Adding a User：https://www.rabbitmq.com/access-control.html
+
+![image-20231105093031433](assets/image-20231105093031433.png)
+
+rabbitmq 端口占用：
+5672：程序连接的端口
+15672：webUI
+![image-20231105093515349](assets/image-20231105093515349.png)
+
+##### 快速入门
+
+MQ 官方教程：https://www.rabbitmq.com/getstarted.html
+
+###### **单向发送**
+Hello World
+文档：https://www.rabbitmq.com/tutorials/tutorial-one-java.html
+
+一个生产者给一个队列发消息，一个消费者从这个队列取消息。1 对 1。
+![image-20231105110131756](assets/image-20231105110131756.png)
+
+1、引入消息队列 Java 客户端：
+
+```xml
+<!-- https://mvnrepository.com/artifact/com.rabbitmq/amqp-client -->
+<dependency>
+    <groupId>com.rabbitmq</groupId>
+    <artifactId>amqp-client</artifactId>
+    <version>5.17.0</version>
+</dependency>
+```
+
+2、生产者代码：https://github.com/rabbitmq/rabbitmq-tutorials/blob/main/java/Send.java
+
+![image-20231105094636969](assets/image-20231105094636969.png)
+
+```java
+public class SingleProducer {
+
+    private final static String QUEUE_NAME = "hello";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        /*//不设置用户名密码，默认就是guest，端口默认5672
+        factory.setUsername();
+        factory.setPassword();
+        factory.setPort();*/
+        // 建立连接，创建频道
+        try (Connection connection = factory.newConnection();
+             Channel channel = connection.createChannel()) {
+            // 创建消息队列
+            channel.queueDeclare(QUEUE_NAME, false, false, false, null);
+            // 发送消息
+            String message = "Hello World!";
+            channel.basicPublish("", QUEUE_NAME, null, message.getBytes(StandardCharsets.UTF_8));
+            System.out.println(" [x] Sent '" + message + "'");
+        }
+    }
+}
+```
+
+Channel 频道：理解为操作消息队列的 client（比如 jdbcClient、redisClient），提供了和消息队列 server 建立通信的传输方法（为了复用连接，提高传输效率）。程序通过 channel 操作 rabbitmq（收发消息）
+
+创建消息队列参数：
+
+```
+Queue.DeclareOk queueDeclare(String queue, boolean durable, boolean exclusive, boolean autoDelete,
+                             Map<String, Object> arguments) throws IOException;
+```
+
+queue：消息队列名称（注意，同名称的消息队列，只能用同样的参数创建一次）
+durabale：消息队列重启后，消息是否丢失
+exclusive：是否只允许当前这个创建消息队列的连接操作消息队列
+autoDelete：没有人用队列后，是否要删除队列
+
+arguments：有需要才传
+
+执行程序后，可以看到有 1 条消息：
+
+![image-20231105100113104](assets/image-20231105100113104.png)
+
+3、消费者代码：https://github.com/rabbitmq/rabbitmq-tutorials/blob/main/java/Recv.java
+
+![image-20231105100230288](assets/image-20231105100230288.png)
+
+```java
+public class SingleConsumer {
+
+    private final static String QUEUE_NAME = "hello";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        Connection connection = factory.newConnection();
+        Channel channel = connection.createChannel();
+        // 创建消息队列
+        channel.queueDeclare(QUEUE_NAME, false, false, false, null);
+        System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
+        // 定义了如何处理消息
+        DeliverCallback deliverCallback = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
+            System.out.println(" [x] Received '" + message + "'");
+        };
+        // 消费消息，会持续阻塞
+        channel.basicConsume(QUEUE_NAME, true, deliverCallback, consumerTag -> { });
+    }
+}
+```
+
+启动消费者后，可以看到消息被消费了：
+![image-20231105100749864](assets/image-20231105100749864.png)
+
+![image-20231105101018159](assets/image-20231105101018159.png)
+
+
+
+###### **多消费者**
+官方教程：https://www.rabbitmq.com/tutorials/tutorial-two-java.html
+场景：多个机器同时去接受并处理任务（尤其是每个机器的处理能力有限）
+一个生产者给一个队列发消息，多个消费者 从这个队列取消息。1 对多。
+![image-20231105101220731](assets/image-20231105101220731.png)
+
+1）队列持久化
+durable 参数设置为 true，服务器重启后队列不丢失：
+
+```java
+channel.queueDeclare(TASK_QUEUE_NAME, true, false, false, null);
+```
+
+2）消息持久化
+指定 MessageProperties.PERSISTENT_TEXT_PLAIN 参数：
+
+```java
+channel.basicPublish("", TASK_QUEUE_NAME,
+        MessageProperties.PERSISTENT_TEXT
+        message.getBytes("UTF-8"));
+```
+
+生产者代码：
+使用 Scanner 接受用户输入，便于发送多条消息
+
+```java
+public class MultiProducer {
+
+    private static final String TASK_QUEUE_NAME = "multi_queue";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        try (Connection connection = factory.newConnection();
+             Channel channel = connection.createChannel()) {
+            // 创建消息队列
+            channel.queueDeclare(TASK_QUEUE_NAME, true, false, false, null);
+            // 发送消息
+            Scanner sc = new Scanner(System.in);
+            while (sc.hasNext()) {
+                String message = sc.nextLine();
+                channel.basicPublish("", TASK_QUEUE_NAME,
+                        MessageProperties.PERSISTENT_TEXT_PLAIN,
+                        message.getBytes("UTF-8"));
+                System.out.println(" [x] Sent '" + message + "'");
+            }
+        }
+    }
+}
+```
+
+控制单个消费者的处理任务积压数：
+每个消费者最多同时处理 1 个任务
+
+```java
+channel.basicQos(1);
+```
+
+消息确认机制：
+为了保证消息成功被消费（快递成功被取走），rabbitmq 提供了消息确认机制，当消费者接收到消息后，比如要给一个反馈：
+
+- ack：消费成功
+- nack：消费失败
+- reject：拒绝
+
+如果告诉 rabbitmq 服务器消费成功，服务器才会放心地移除消息。
+支持配置 autoack，会自动执行 ack 命令，接收到消息立刻就成功了。
+
+```java
+channel.basicConsume(TASK_QUEUE_NAME, false, deliverCallback, consumerTag -> {});
+```
+
+建议 autoack 改为 false，根据实际情况，去手动确认。 
+指定确认某条消息：
+第二个参数 multiple 批量确认：是指是否要一次性确认所有的历史消息直到当前这条
+
+```java
+ channel.basicAck(delivery.getEnvelope().getDeliveryTag(),false);
+```
+
+指定拒绝某条消息：
+第 3 个参数表示是否重新入队，可用于重试
+
+```java
+channel.basicNack(delivery.getEnvelope().getDeliveryTag(),false,false );
+```
+
+消费者代码：
+
+```java
+public class MultiConsumer {
+
+    private static final String TASK_QUEUE_NAME = "multi_queue";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        final Connection connection = factory.newConnection();
+        for (int i = 0; i < 2; i++) {
+            final Channel channel = connection.createChannel();
+            // 创建消息队列
+            channel.queueDeclare(TASK_QUEUE_NAME, true, false, false, null);
+            System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
+            // 控制每个消费者最多同时处理 1 个任务
+            channel.basicQos(1);
+            // 定义了如何处理消息
+            int finalI = i;
+            DeliverCallback deliverCallback = (consumerTag, delivery) -> {
+                String message = new String(delivery.getBody(), "UTF-8");
+                try {
+                    // 处理逻辑
+                    System.out.println(" [x] Received 编号" + finalI + "'" + message + "'");
+                    //睡20秒，模拟工人每20秒处理一条消息，处理能力有限
+                    Thread.sleep(20000);
+                    // 确认消息
+                    channel.basicAck(delivery.getEnvelope().getDeliveryTag(),false);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    // 拒绝消息
+                    channel.basicNack(delivery.getEnvelope().getDeliveryTag(),false,false );
+                } finally {
+                    System.out.println(" [x] Done");
+                }
+            };
+            // 消费消息，会持续阻塞
+            channel.basicConsume(TASK_QUEUE_NAME, false, deliverCallback, consumerTag -> {
+            });
+        }
+    }
+}
+```
+
+2 个小技巧：
+
+1. 使用 Scanner 接受用户输入，便于快速发送多条消息
+2. 使用 for 循环创建多个消费者，便于快速验证队列模型工作机制
+
+###### 交换机
+
+教程：https://www.rabbitmq.com/tutorials/tutorial-three-java.html
+
+一个生产者给 多个 队列发消息，1 个生产者对多个队列。
+交换机的作用：提供消息转发功能，类似于网络路由器
+要解决的问题：怎么把消息转发到不同的队列上，好让消费者从不同的队列消费。
+
+![image-20231105110056833](assets/image-20231105110056833.png)
+
+绑定：交换机和队列关联起来，也可以叫路由，算是一个算法或转发策略
+绑定代码：
+
+```java
+channel.queueBind(queueName, EXCHANGE_NAME, "routingkey");
+```
+
+交换机有多种类别：fanout、direct, topic, headers
+
+`fanout`
+扇出、广播
+特点：消息会被转发到所有绑定到该交换机的队列
+场景：很适用于发布订阅的场景。比如写日志，可以多个系统间共享
+
+示例场景：
+![image-20231105112941972](assets/image-20231105112941972.png)
+
+
+
+生产者代码：
+
+```java
+public class FanoutProducer {
+
+    private static final String EXCHANGE_NAME = "fanout-exchange";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        try (Connection connection = factory.newConnection();
+             Channel channel = connection.createChannel()) {
+            // 创建交换机
+            channel.exchangeDeclare(EXCHANGE_NAME, "fanout");
+            Scanner sc = new Scanner(System.in);
+            while (sc.hasNext()) {
+                String message = sc.nextLine();
+                // 向交换机发消息
+                channel.basicPublish(EXCHANGE_NAME, "", null, message.getBytes("UTF-8"));
+                System.out.println(" [x] Sent '" + message + "'");
+            }
+        }
+    }
+}
+```
+
+消费者代码：
+
+```java
+public class FanoutConsumer {
+    private static final String EXCHANGE_NAME = "fanout-exchange";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        Connection connection = factory.newConnection();
+        Channel channel1 = connection.createChannel();
+        Channel channel2 = connection.createChannel();
+        //创建交换机
+        channel1.exchangeDeclare(EXCHANGE_NAME, "fanout");
+        // 创建队列
+        String queueName1 = "小王的工作队列";
+        String queueName2 = "小李的工作队列";
+        channel1.queueDeclare(queueName1, true, false, false, null);
+        channel2.queueDeclare(queueName2, true, false, false, null);
+        //绑定交换机
+        channel1.queueBind(queueName1, EXCHANGE_NAME, "");
+        channel2.queueBind(queueName2, EXCHANGE_NAME, "");
+
+        System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
+        // 定义了小王如何处理消息
+        DeliverCallback deliverCallback1 = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), "UTF-8");
+            System.out.println(" [小王] Received '" + message + "'");
+        };
+        // 定义了小李如何处理消息
+        DeliverCallback deliverCallback2 = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), "UTF-8");
+            System.out.println(" [小李] Received '" + message + "'");
+        };
+        // 消费消息
+        channel1.basicConsume(queueName1, true, deliverCallback1, consumerTag -> {
+        });
+        channel2.basicConsume(queueName2, true, deliverCallback2, consumerTag -> {
+        });
+    }
+}
+```
+
+注意：
+
+1. 消费者和生产者要绑定同一个交换机
+2. 要先创建队列，才能绑定
+
+效果：所有消费者都能收到消息
+
+`Direct 交换机`
+官方教程：https://www.rabbitmq.com/tutorials/tutorial-four-java.html
+绑定：可以让交换机和队列进行关联，可以指定让交互机把什么样的消息发送给哪个队列
+routingKey：路由键，控制消息要转发给哪个队列（相当于IP 地址），也代表了队列订阅的消息类型
+
+特点：消息会根据路由键转发到指定的队列
+场景：特定的消息只交给特定的系统（程序）来处理
+绑定关系：完全匹配字符串
+![image-20231105114053528](assets/image-20231105114053528.png)
+
+可以绑定同样的路由键。
+
+比如发日志的场景，希望用独立的程序来处理不同级别的日志，比如 C1 系统处理 error 日志，C2 系统处理其他级别的日志
+
+![image-20231105114533952](assets/image-20231105114533952.png)
+
+示例场景：
+
+![image-20231105114615725](assets/image-20231105114615725.png)
+
+生产者代码：
+
+```java
+public class DirectProducer {
+
+    private static final String EXCHANGE_NAME = "direct-exchange";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        try (Connection connection = factory.newConnection();
+             Channel channel = connection.createChannel()) {
+            // 创建交换机
+            channel.exchangeDeclare(EXCHANGE_NAME, "direct");
+            Scanner sc = new Scanner(System.in);
+            while (sc.hasNext()) {
+                String userInput = sc.nextLine();
+                String[] strings = userInput.split(" ");
+                if (strings.length < 1) {
+                    continue;
+                }
+                String message = strings[0];
+                // 从输入获取路由键
+                String routingKey = strings[1];
+                // 向交换机发消息
+                channel.basicPublish(EXCHANGE_NAME, routingKey, null, message.getBytes("UTF-8"));
+                System.out.println(" [x] Sent '" + message + "' with routing:" + routingKey);
+            }
+        }
+    }
+}
+```
+
+消费者代码：
+
+```java
+public class DirectConsumer {
+
+    private static final String EXCHANGE_NAME = "direct-exchange";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        Connection connection = factory.newConnection();
+        Channel channel1 = connection.createChannel();
+        Channel channel2 = connection.createChannel();
+        // 创建交换机
+        channel1.exchangeDeclare(EXCHANGE_NAME, "direct");
+        // 创建队列
+        String queueName1 = "小落的工作队列";
+        String queueName2 = "小樱的工作队列";
+        channel1.queueDeclare(queueName1, true, false, false, null);
+        channel2.queueDeclare(queueName2, true, false, false, null);
+        // 绑定交换机，指定路由键
+        channel1.queueBind(queueName1, EXCHANGE_NAME, "xiaoluo");
+        channel2.queueBind(queueName2, EXCHANGE_NAME, "xiaoying");
+        System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
+
+        // 定义了小落如何处理消息
+        DeliverCallback deliverCallback1 = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), "UTF-8");
+            System.out.println(" [小落] Received '" +
+                    delivery.getEnvelope().getRoutingKey() + "':'" + message + "'");
+        };
+        // 定义了小樱如何处理消息
+        DeliverCallback deliverCallback2 = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), "UTF-8");
+            System.out.println(" [小樱] Received '" +
+                    delivery.getEnvelope().getRoutingKey() + "':'" + message + "'");
+        };
+        // 消费消息
+        channel1.basicConsume(queueName1, true, deliverCallback1, consumerTag -> {
+        });
+        channel2.basicConsume(queueName2, true, deliverCallback2, consumerTag -> {
+        });
+    }
+}
+```
+
+`topic 交换机`
+官方教程：https://www.rabbitmq.com/tutorials/tutorial-five-java.html
+特点：消息会根据一个 模糊的 路由键转发到指定的队列
+场景：特定的一类消息可以交给特定的一类系统（程序）来处理
+绑定关系：可以模糊匹配多个绑定
+
+- *：匹配一个单词，比如 *.orange，那么 a.orange、b.orange 都能匹配
+- #：匹配 0 个或多个单词，比如 a.#，那么 a、a.a、a.b、a.a.a 都能匹配
+
+注意，这里的匹配和 MySQL 的like 的 % 不一样，只能按照单词来匹配，每个 '.' 分隔单词
+
+![image-20231105123339317](assets/image-20231105123339317.png)
+
+应用场景：
+![image-20231105123626226](assets/image-20231105123626226.png)
+
+生产者代码：
+
+```java
+public class TopicProducer {
+
+    private static final String EXCHANGE_NAME = "topic-exchange";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        try (Connection connection = factory.newConnection();
+             Channel channel = connection.createChannel()) {
+            // 创建交换机
+            channel.exchangeDeclare(EXCHANGE_NAME, "topic");
+            Scanner sc = new Scanner(System.in);
+            while (sc.hasNext()) {
+                String userInput = sc.nextLine();
+                String[] strings = userInput.split(" ");
+                if (strings.length < 1) {
+                    continue;
+                }
+                String message = strings[0];
+                // 从输入获取路由键
+                String routingKey = strings[1];
+                // 向交换机发消息
+                channel.basicPublish(EXCHANGE_NAME, routingKey, null, message.getBytes("UTF-8"));
+                System.out.println(" [x] Sent '" + message + "' with routing:" + routingKey);
+            }
+        }
+    }
+}
+```
+
+消费者代码：
+
+```java
+public class TopicConsumer {
+
+    private static final String EXCHANGE_NAME = "topic-exchange";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        Connection connection = factory.newConnection();
+        Channel channel1 = connection.createChannel();
+        Channel channel2 = connection.createChannel();
+        Channel channel3 = connection.createChannel();
+        // 创建交换机
+        channel1.exchangeDeclare(EXCHANGE_NAME, "topic");
+        // 创建队列
+        String queueName1 = "前端的工作队列";
+        String queueName2 = "后端的工作队列";
+        String queueName3 = "产品的工作队列";
+        channel1.queueDeclare(queueName1, true, false, false, null);
+        channel2.queueDeclare(queueName2, true, false, false, null);
+        channel3.queueDeclare(queueName3, true, false, false, null);
+        // 绑定交换机，指定路由键
+        channel1.queueBind(queueName1, EXCHANGE_NAME, "#.前端.#");
+        channel2.queueBind(queueName2, EXCHANGE_NAME, "#.后端.#");
+        channel3.queueBind(queueName3, EXCHANGE_NAME, "#.产品.#");
+        System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
+        // 定义了前端如何处理消息
+        DeliverCallback deliverCallback1 = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), "UTF-8");
+            System.out.println(" [前端] Received '" +
+                    delivery.getEnvelope().getRoutingKey() + "':'" + message + "'");
+        };
+        // 定义了后端如何处理消息
+        DeliverCallback deliverCallback2 = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), "UTF-8");
+            System.out.println(" [后端] Received '" +
+                    delivery.getEnvelope().getRoutingKey() + "':'" + message + "'");
+        };
+        // 定义了产品如何处理消息
+        DeliverCallback deliverCallback3 = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), "UTF-8");
+            System.out.println(" [产品] Received '" +
+                    delivery.getEnvelope().getRoutingKey() + "':'" + message + "'");
+        };
+        // 消费消息
+        channel1.basicConsume(queueName1, true, deliverCallback1, consumerTag -> {
+        });
+        channel2.basicConsume(queueName2, true, deliverCallback2, consumerTag -> {
+        });
+        channel3.basicConsume(queueName3, true, deliverCallback3, consumerTag -> {
+        });
+    }
+}
+```
+
+`Headers 交换机`
+类似主题和直接交换机，可以根据 headers 中的内容来指定发送到哪个队列
+由于性能差、比较复杂，一般不推荐使用。
+
+AI 学习连环问：Headers 交换机是什么？有什么用？什么场景下会用？有什么优缺点？有没有示例代码？
+
+1. RabbitMQ中的Headers交换机是一种特殊的交换机，它允许你在发送消息时添加自定义的headers。Headers交换机的主要作用是提供一种更灵活的消息路由方式，它允许你根据消息的headers字段来路由消息，而不是依赖传统的队列或交换机的pattern匹配。这种方式在一些复杂的场景下非常有用，例如消息的过滤、分组、优先级处理等。
+
+   使用Headers交换机的一个常见场景是在微服务架构中，当需要将消息路由到不同的服务时。通过在发送消息时添加headers，我们可以传递额外的信息，如服务的名称、优先级、消息的来源等。这样，每个服务可以根据其需要读取和处理这些headers，从而实现更细粒度的控制和更灵活的消息路由。
+
+   Headers交换机的优点主要有：
+
+   1. 更加灵活的消息路由：Headers交换机允许你根据消息的headers字段进行路由，而不仅仅是基于传统的队列或交换器的pattern匹配。
+   2. 高级别的抽象：Headers交换机提供了一种高级别的抽象，使得消息的路由和传递更加灵活和易于管理。
+   3. 适用于复杂的业务场景：在一些复杂的业务场景下，如消息过滤、分组、优先级处理等，Headers交换机可以提供更好的支持。
+
+   然而，Headers交换机也有一些缺点：
+
+   1. 性能影响：由于Headers交换机需要对每个消息进行额外的处理（如解析headers），因此可能会对性能产生一定的影响。
+   2. 兼容性问题：不是所有的消息队列系统都支持Headers交换机。在使用Headers交换机之前，你需要确保你的RabbitMQ服务器和客户端库都支持这个特性。
+
+`RPC`
+支持用消息队列来模拟 RPC 的调用，但是一般没必要，直接用 Dubbo、GRPC 等 RPC 框架就好了。
+
+实现一个场景总有更合适的、更专注的技术
+
+##### 核心特性
+###### 消息过期机制
+官方文档：https://www.rabbitmq.com/ttl.html
+可以给每条消息指定一个有效期，一段时间内未被消费者处理，就过期了。
+示例场景：消费者（库存系统）挂了，一个订单 15 分钟还没被库存系统处理，这个订单其实已经失效了，哪怕库存系统再恢复，其实也不用扣减库存。
+适用场景：清理过期消息、模拟延迟队列的实现（不开会员就慢速）、专门让某个程序处理过期请求
+
+1）给队列中的所有消息指定过期时间
+
+```java
+Map<String, Object> args = new HashMap<String, Object>();
+args.put("x-message-ttl", 60000);
+channel.queueDeclare("myqueue", false, false, false, args);
+```
+
+![image-20231105132513571](assets/image-20231105132513571.png)
+如果在过期时间内，还没有消费者接收到消息，消息才会过期。
+注意，如果消息已经被消费者接收到，但是消费者没确认ack，是不会过期的。
+如果消息处于待消费状态并且过期时间到达后，消息将被标记为过期。但是，如果消息已经被消费者消费，并且正在处理过程中，即使过期时间到达，消息仍然会被正常处理。
+
+生产者代码：
+
+```java
+public class AllTTLProducer {
+
+    private final static String QUEUE_NAME = "all-ttl-queue";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        try (Connection connection = factory.newConnection();
+             Channel channel = connection.createChannel()) {
+            // 创建消息队列，给队列中的所有消息指定过期时间
+            Map<String, Object> args = new HashMap<String, Object>();
+            args.put("x-message-ttl", 6000);
+            channel.queueDeclare(QUEUE_NAME, false, false, false, args);
+            // 发送消息
+            String message = "Hello World!";
+            channel.basicPublish("", QUEUE_NAME, null, message.getBytes(StandardCharsets.UTF_8));
+            System.out.println(" [x] Sent '" + message + "'");
+        }
+    }
+}
+```
+
+消费者代码：
+
+```java
+public class AllTTLConsumer {
+
+    private final static String QUEUE_NAME = "all-ttl-queue";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        Connection connection = factory.newConnection();
+        Channel channel = connection.createChannel();
+        // 创建消息队列，指定消息过期参数
+        Map<String, Object> args = new HashMap<String, Object>();
+        args.put("x-message-ttl", 6000);
+        channel.queueDeclare(QUEUE_NAME, false, false, false, args);
+        System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
+        // 定义了如何处理消息
+        DeliverCallback deliverCallback = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
+            System.out.println(" [x] Received '" + message + "'");
+        };
+        // 消费消息，会持续阻塞
+        channel.basicConsume(QUEUE_NAME, false, deliverCallback, consumerTag -> {
+        });
+    }
+}
+```
+
+
+2）给某条消息指定过期时间
+
+语法：
+
+```java
+AMQP.BasicProperties properties = new AMQP.BasicProperties.Builder()
+                                   .expiration("60000")
+                                   .build();
+channel.basicPublish("my-exchange", "routing-key", properties, messageBodyBytes);
+```
+
+生产者代码：
+
+```java
+public class PerTTLProducer {
+
+    private final static String QUEUE_NAME = "per-ttl-queue";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        try (Connection connection = factory.newConnection();
+             Channel channel = connection.createChannel()) {
+            // 创建消息队列
+            channel.queueDeclare(QUEUE_NAME, false, false, false, null);
+            // 发送消息
+            String message = "Hello World!";
+            // 给单条消息指定过期时间
+            AMQP.BasicProperties properties = new AMQP.BasicProperties.Builder()
+                    .expiration("6000")
+                    .build();
+            channel.basicPublish("", QUEUE_NAME, properties, message.getBytes(StandardCharsets.UTF_8));
+            System.out.println(" [x] Sent '" + message + "'");
+        }
+    }
+}
+```
+
+消费者代码:
+
+```java
+public class PerTTLConsumer {
+
+    private final static String QUEUE_NAME = "per-ttl-queue";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        Connection connection = factory.newConnection();
+        Channel channel = connection.createChannel();
+        // 创建消息队列
+        channel.queueDeclare(QUEUE_NAME, false, false, false, null);
+        System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
+        // 定义了如何处理消息
+        DeliverCallback deliverCallback = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), StandardCharsets.UTF_8);
+            System.out.println(" [x] Received '" + message + "'");
+        };
+        // 消费消息，会持续阻塞
+        channel.basicConsume(QUEUE_NAME, false, deliverCallback, consumerTag -> {
+        });
+    }
+}
+```
+
+
+
+###### 消息确认机制
+官方文档：https://www.rabbitmq.com/confirms.html
+为了保证消息成功被消费（快递成功被取走），rabbitmq 提供了消息确认机制，当消费者接收到消息后，比如要给一个反馈：
+
+- ack：消费成功
+- nack：消费失败
+- reject：拒绝
+
+如果告诉 rabbitmq 服务器消费成功，服务器才会放心地移除消息。
+支持配置 autoack，会自动执行 ack 命令，接收到消息立刻就成功了。
+
+```java
+channel.basicConsume(TASK_QUEUE_NAME, false, deliverCallback, consumerTag -> {});
+```
+
+建议 autoack 改为 false，根据实际情况，去手动确认。 
+指定确认某条消息：
+第二个参数 multiple 批量确认：是指是否要一次性确认所有的历史消息直到当前这条
+
+```java
+ channel.basicAck(delivery.getEnvelope().getDeliveryTag(),false);
+```
+
+指定拒绝某条消息：
+第 3 个参数表示是否重新入队，可用于重试
+
+```java
+channel.basicNack(delivery.getEnvelope().getDeliveryTag(),false,false );
+```
+
+###### 死信队列
+官方文档：https://www.rabbitmq.com/dlx.html
+为了保证消息的可靠性，比如让每条消息都成功消费，需要提供一个容错机制，即：失败的消息怎么处理？
+死信：过期的消息、拒收的消息、消息队列满了、处理失败的消息的统称
+死信队列：专门处理死信的队列（注意，它就是一个普通队列，只不过是专门用来处理死信的，你甚至可以理解这个队列的名称叫 “死信队列”）
+死信交换机：专门给死信队列转发消息的交换机（注意，它就是一个普通交换机，只不过是专门给死信队列发消息而已，理解为这个交换机的名称就叫 “死信交换机”）。也存在路由绑定
+死信可以通过死信交换机绑定到死信队列。
+
+示例场景：
+![image-20231105135352929](assets/image-20231105135352929.png)
+
+流程：
+
+老板或外包 给 小猫或小狗 发消息，小猫或小狗 拒绝消息，消息成为死信，死信回到 老板或外包 的死信队列，有老板或外包去处理
+
+生产者代码：
+
+```java
+public class DlxDirectProducer {
+
+    private static final String DEAD_EXCHANGE_NAME = "dlx-direct-exchange";
+    private static final String WORK_EXCHANGE_NAME = "direct-exchange2";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        try (Connection connection = factory.newConnection();
+             Channel channel1 = connection.createChannel();
+             Channel channel2 = connection.createChannel();
+        ) {
+            // 创建死信交换机
+            channel1.exchangeDeclare(DEAD_EXCHANGE_NAME, "direct");
+            // 创建死信队列
+            String queueName1 = "老板的死信队列";
+            String queueName2 = "外包的死信队列";
+            channel1.queueDeclare(queueName1, true, false, false, null);
+            channel2.queueDeclare(queueName2, true, false, false, null);
+            // 绑定死信交换机，指定路由键
+            channel1.queueBind(queueName1, DEAD_EXCHANGE_NAME, "老板");
+            channel2.queueBind(queueName2, DEAD_EXCHANGE_NAME, "外包");
+            System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
+            // 定义了老板如何处理死信
+            DeliverCallback deliverCallback1 = (consumerTag, delivery) -> {
+                String message = new String(delivery.getBody(), "UTF-8");
+                System.out.println(" [老板] Received 死信 '" +
+                        delivery.getEnvelope().getRoutingKey() + "':'" + message + "'");
+                channel1.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
+            };
+            // 定义了外包如何处理死信
+            DeliverCallback deliverCallback2 = (consumerTag, delivery) -> {
+                String message = new String(delivery.getBody(), "UTF-8");
+                System.out.println(" [外包] Received 死信 '" +
+                        delivery.getEnvelope().getRoutingKey() + "':'" + message + "'");
+                channel2.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
+            };
+            // 消费消息
+            channel1.basicConsume(queueName1, false, deliverCallback1, consumerTag -> {
+            });
+            channel2.basicConsume(queueName2, false, deliverCallback2, consumerTag -> {
+            });
+
+            Scanner sc = new Scanner(System.in);
+            while (sc.hasNext()) {
+                String userInput = sc.nextLine();
+                String[] strings = userInput.split(" ");
+                if (strings.length < 1) {
+                    continue;
+                }
+                String message = strings[0];
+                // 从输入获取路由键
+                String routingKey = strings[1];
+                // 老板和外包向工作交换机发消息
+                channel1.basicPublish(WORK_EXCHANGE_NAME, routingKey, null, message.getBytes("UTF-8"));
+                System.out.println(" [x] Sent '" + message + "' with routing:" + routingKey);
+            }
+        }
+    }
+}
+```
+
+消费者代码：
+
+```java
+public class DlxDirectConsumer {
+
+    private static final String DEAD_EXCHANGE_NAME = "dlx-direct-exchange";
+    private static final String WORK_EXCHANGE_NAME = "direct-exchange2";
+
+    public static void main(String[] argv) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        Connection connection = factory.newConnection();
+        Channel channel1 = connection.createChannel();
+        Channel channel2 = connection.createChannel();
+        // 指定死信参数
+        Map<String, Object> args1 = new HashMap<String, Object>();
+        Map<String, Object> args2= new HashMap<String, Object>();
+        // 指定死信交换机
+        args1.put("x-dead-letter-exchange", DEAD_EXCHANGE_NAME);
+        args2.put("x-dead-letter-exchange", DEAD_EXCHANGE_NAME);
+        // 指定死信要转发到哪个队列
+        args1.put("x-dead-letter-routing-key", "老板");
+        args2.put("x-dead-letter-routing-key", "外包");
+
+        // 创建工作交换机
+        channel1.exchangeDeclare(WORK_EXCHANGE_NAME, "direct");
+        // 创建员工队列
+        String queueName1 = "小猫的工作队列";
+        String queueName2 = "小狗的工作队列";
+        channel1.queueDeclare(queueName1, true, false, false, args1);
+        channel2.queueDeclare(queueName2, true, false, false, args2);
+        // 绑定死信交换机，指定路由键
+        channel1.queueBind(queueName1, WORK_EXCHANGE_NAME, "小猫");
+        channel2.queueBind(queueName2, WORK_EXCHANGE_NAME, "小狗");
+        System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
+
+        // 定义了小猫如何处理消息
+        DeliverCallback deliverCallback1 = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), "UTF-8");
+            //拒绝消息
+            System.out.println(" [小猫] Received '" +
+                    delivery.getEnvelope().getRoutingKey() + "':'" + message + "'");
+            channel1.basicNack(delivery.getEnvelope().getDeliveryTag(),false,false);
+        };
+        // 定义了小狗如何处理消息
+        DeliverCallback deliverCallback2 = (consumerTag, delivery) -> {
+            String message = new String(delivery.getBody(), "UTF-8");
+            //拒绝消息
+            System.out.println(" [小狗] Received '" +
+                    delivery.getEnvelope().getRoutingKey() + "':'" + message + "'");
+            channel2.basicNack(delivery.getEnvelope().getDeliveryTag(),false,false);
+        };
+        // 消费消息
+        channel1.basicConsume(queueName1, false, deliverCallback1, consumerTag -> {
+        });
+        channel2.basicConsume(queueName2, false, deliverCallback2, consumerTag -> {
+        });
+    }
+}
+```
+
+##### RabbitMQ 重点知识
+
+也是面试考点
+
+1. 消息队列的概念、模型、应用场景
+2. 交换机的类别、路由绑定的关系
+3. 消息可靠性
+   1. 消息确认机制（ack、nack、reject）
+   2. 消息持久化（durable）
+   3. 消息过期机制
+   4. 死信队列
+4. 延迟队列（类似死信队列，消息在工作队列中睡上5分钟，然后拒绝消息，消息成为死信进入死信队列，然后像处理正常消息一样处理死信，就达到了延迟效果）
+5. 顺序消费、消费幂等性（本次不讲）
+6. 可扩展性（仅作了解）
+   - 集群
+   - 故障的恢复机制
+   - 镜像
+7. 运维监控告警（仅作了解）
+
+相关资源推荐
+https://juejin.cn/post/7225474899480526885
+https://t.zsxq.com/0fq7F1WAa
+
+#### RabbitMQ 项目实战
+
+##### 选择客户端
+怎么在项目中使用 RabbitMQ？
+1、使用官方的客户端。
+优点：兼容性好，换语言成本低，比较灵活（类似JDBC）
+缺点：太灵活，要自己去处理一些事情。比如要自己维护管理链接，很麻烦。
+
+2、使用封装好的客户端，比如 Spring Boot RabbitMQ Starter
+优点：简单易用，直接配置直接用，更方便地去管理连接（类似MyBatis）
+缺点：封装的太好了，你没学过的话反而不知道怎么用。不够灵活，被框架限制。
+
+本次使用 Spring Boot RabbitMQ Starter
+
+建议看官方文档，不要看过期博客！
+https://spring.io/guides/gs/messaging-rabbitmq/
+
+##### 基础实战
+
+1、引入依赖
+注意，使用的版本一定要和你的 springboot 版本一致！！！！！！！
+
+```xml
+<!-- https://mvnrepository.com/artifact/org.springframework.boot/spring-boot-starter-amqp -->
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-amqp</artifactId>
+    <version>2.7.2</version>
+</dependency>
+```
+
+2、在 yml 中引入配置
+
+```yml
+spring:
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: guest
+    password: guest
+```
+
+3、创建交换机和队列
+
+```java
+/**
+ * 用于创建测试用到的交换机和队列（只在主程序启动前执行一次）
+ */
+public class MQInit {
+    public static void main(String[] args) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        Connection connection = factory.newConnection();
+        Channel channel = connection.createChannel();
+        // 创建交换机
+        String EXCHANGE_NAME = "code-exchange";
+        channel.exchangeDeclare(EXCHANGE_NAME,"direct");
+        // 创建队列
+        String queueName = "code-queue";
+        channel.queueDeclare(queueName, true, false, false, null);
+        // 绑定交换机，指定路由键
+        channel.queueBind(queueName, EXCHANGE_NAME, "code-key");
+    }
+}
+```
+
+4、生产者代码
+
+```java
+@Component
+public class MyMessageProducer {
+    @Resource
+    private RabbitTemplate rabbitTemplate;
+
+    public void sendMessage(String exchange,String routingKey,String messgae){
+        rabbitTemplate.convertAndSend(exchange,routingKey,messgae);
+    }
+}
+```
+
+5、消费者代码
+
+```java
+@Component
+@Slf4j
+public class MyMessageConsumer {
+    @Resource
+    private RabbitTemplate rabbitTemplate;
+
+    //指定程序监听的消息队列和确认机制
+    @RabbitListener(queues = {"code-queue"}, ackMode = "MANUAL")
+    public void receiveMessage(String message, Channel channel, @Header(AmqpHeaders.DELIVERY_TAG) long deliveryTag)
+            throws IOException {
+        log.info("receiveMessage message={}", message);
+        channel.basicAck(deliveryTag, false);
+    }
+}
+```
+
+6、单元测试执行
+
+```java
+@SpringBootTest
+class MyMessageProducerTest {
+    @Resource
+    private MyMessageProducer myMessageProducer;
+
+    /**
+     * 先启动SpringBoot项目，再执行该测试
+     */
+    @Test
+    void sendMessage() {
+        myMessageProducer.sendMessage("code-exchange", "code-key", "你好");
+    }
+}
+```
+
+##### BI 项目改造
+以前是把任务提交到线程池，然后在线程池提交中编写处理程序的代码，线程池内排队。
+如果主程序中断了，任务就没了，就丢了。
+
+`改造后的流程：`
+
+1. 把任务提交改为向队列发送消息
+2. 写一个专门的接受消息的程序，处理任务
+3. 如果程序中断了，消息未被确认，还会重发
+4. 现在，消息全部集中发到消息队列，你可以部署多个后端，都从同一个地方取任务，从而实现了分布式负载均衡
+
+`实现步骤`
+1）创建交换机和队列
+2）将线程池中的执行代码移到消费者类中
+3）根据消费者的需求来确认消息的格式（chartId）
+4）将提交线程池改造为发送消息到队列
+
+```java
+public class BIMQConstant {
+    public static final String BI_EXCHANGE_NAME = "bi-exchange";
+
+    public static final String BI_QUEUE_NAME = "bi-queue";
+
+    public static final String BI_ROUTING_KEY = "bi-key";
+}
+```
+
+```java
+/**
+ * 用于创建测试用到的交换机和队列（只在主程序启动前执行一次）
+ */
+public class BIMQInit {
+    public static void main(String[] args) throws Exception {
+        // 创建连接工厂
+        ConnectionFactory factory = new ConnectionFactory();
+        factory.setHost("localhost");
+        // 建立连接，创建频道
+        Connection connection = factory.newConnection();
+        Channel channel = connection.createChannel();
+        // 创建交换机
+        String EXCHANGE_NAME = BIMQConstant.BI_EXCHANGE_NAME;
+        channel.exchangeDeclare(EXCHANGE_NAME,"direct");
+        // 创建队列
+        String queueName = BIMQConstant.BI_QUEUE_NAME;
+        channel.queueDeclare(queueName, true, false, false, null);
+        // 绑定交换机，指定路由键
+        channel.queueBind(queueName, EXCHANGE_NAME, BIMQConstant.BI_ROUTING_KEY);
+    }
+}
+```
+
+```java
+@Component
+public class BIMessageProducer {
+    @Resource
+    private RabbitTemplate rabbitTemplate;
+
+    /**
+     * 发送消息
+     * @param messgae
+     */
+    public void sendMessage(String messgae){
+        rabbitTemplate.convertAndSend(BIMQConstant.BI_EXCHANGE_NAME,BIMQConstant.BI_ROUTING_KEY,messgae);
+    }
+}
+```
+
+```java
+@Component
+@Slf4j
+public class BIMessageConsumer {
+
+    @Resource
+    private ChartService chartService;
+
+    @Resource
+    private AIManager aiManager;
+
+    //指定程序监听的消息队列和确认机制
+    @RabbitListener(queues = {BIMQConstant.BI_QUEUE_NAME}, ackMode = "MANUAL")
+    public void receiveMessage(String message, Channel channel, @Header(AmqpHeaders.DELIVERY_TAG) long deliveryTag)
+            throws IOException {
+        if (StringUtils.isBlank(message)){
+            channel.basicNack(deliveryTag,false,false);
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"消息为空");
+
+        }
+        long chartId = Long.parseLong(message);
+        Chart chart = chartService.getById(chartId);
+        if (chart==null){
+            channel.basicNack(deliveryTag,false,false);
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR,"消息为空");
+        }
+        //先修改图表的任务状态为“执行中”；等执行成功后，修改为“已完成”，保存执行结果；执行失败后，修改为失败，记录失败信息
+        //修改任务状态为执行中，减少重复执行的风险、同时让用户知晓执行状态
+        Chart updateChart = new Chart();
+        updateChart.setId(chart.getId());
+        updateChart.setStatus("running");
+        boolean result = chartService.updateById(updateChart);
+        if (!result) {
+            channel.basicNack(deliveryTag,false,false);
+            handleChartUpdateError(chart.getId(), "更新图表执行中状态失败");
+            return;
+        }
+        // 调用鱼聪明SDK，得到响应
+
+        String answer = aiManager.doChat(CommonConstant.BI_MODEL_ID, buildUserInput(chart));
+        // 从AI响应结果中，取出需要的数据
+        String[] splits = answer.split("【【【【【");
+        if (splits.length < 3) {
+            channel.basicNack(deliveryTag,false,false);
+            handleChartUpdateError(chart.getId(), "AI生成错误");
+            return;
+        }
+        String genChart = splits[1].trim();
+        String genSummary = splits[2].trim();
+        //执行成功
+        Chart updateChartResult = new Chart();
+        updateChartResult.setId(chart.getId());
+        //todo 建议定义状态为枚举值
+        updateChartResult.setStatus("succeeded");
+        updateChartResult.setGenChart(genChart);
+        updateChartResult.setGenSummary(genSummary);
+        result = chartService.updateById(updateChartResult);
+        if (!result) {
+            channel.basicNack(deliveryTag,false,false);
+            handleChartUpdateError(chart.getId(), "更新图表已完成状态失败");
+            return;
+        }
+        //确认消息
+        channel.basicAck(deliveryTag, false);
+    }
+
+    private void handleChartUpdateError(long chartId, String execMessage) {
+        Chart updateChart = new Chart();
+        updateChart.setId(chartId);
+        updateChart.setStatus("failed");
+        updateChart.setExecMessage(execMessage);
+        boolean result = chartService.updateById(updateChart);
+        if (!result) {
+            log.error("更新图表失败状态失败，" + chartId + "，" + execMessage);
+        }
+    }
+    /**
+     * 构造用户请求
+     * @param chart
+     * @return
+     */	
+    private String buildUserInput(Chart chart) {
+        String goal = chart.getGoal();
+        String data = chart.getRawData();
+        // 构造用户请求（分析目标，图表名称，图表类型，csv数据）
+        StringBuilder userInput = new StringBuilder();
+        userInput.append("分析需求：").append("\n");
+        userInput.append(goal).append("\n");
+        userInput.append("原始数据：").append("\n");
+        userInput.append(data).append("\n");
+        return userInput.toString();
+    }
+}
+```
+
+```java
+/**
+ * 智能分析（异步&消息队列）
+ *
+ * @param multipartFile
+ * @param genChartRequest
+ * @param request
+ * @return
+ */
+@PostMapping("/gen")
+public BaseResponse<BIResponse> genChartByAI(@RequestPart("file") MultipartFile multipartFile,
+                                             GenChartRequest genChartRequest, HttpServletRequest request) {
+    String goal = genChartRequest.getGoal();
+    String chartType = genChartRequest.getChartType();
+    String chartName = genChartRequest.getChartName();
+    // 拼接分析目标
+    if (StringUtils.isNotBlank(chartType)) {
+        goal = goal + "，请使用" + chartType;
+    }
+    // 校验参数
+    ThrowUtils.throwIf(StringUtils.isBlank(goal), ErrorCode.PARAMS_ERROR, "分析目标为空");
+    ThrowUtils.throwIf(StringUtils.isNotBlank(chartName) && chartName.length() > 128, ErrorCode.PARAMS_ERROR, "图表名称过长");
+    // 校验文件
+    long size = multipartFile.getSize();
+    String originalFilename = multipartFile.getOriginalFilename();
+    // 校验文件大小
+    final long ONE_MB = 1024 * 1024L;
+    ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR, "文件大小超过 1M");
+    // 校验文件后缀
+    String suffix = FileUtil.getSuffix(originalFilename);
+    final List<String> validFileSuffix = Arrays.asList("xlsx");
+    ThrowUtils.throwIf(!validFileSuffix.contains(suffix), ErrorCode.PARAMS_ERROR, "文件后缀不符合要求");
+    // 获取登录用户
+    User loginUser = userService.getLoginUser(request);
+    // 限流,每个用户一个限流器
+    redisLimiterManager.doRateLimit("genChartByAI_" + loginUser.getId().toString());
+    // 压缩原始数据
+    String data = ExcelUtils.excelToCsv(multipartFile);
+    // 插入数据库
+    Chart chart = new Chart();
+    chart.setGoal(goal);
+    chart.setRawData(data);
+    chart.setChartType(chartType);
+    chart.setChartName(chartName);
+    chart.setUserId(loginUser.getId());
+    chart.setStatus("wait");
+    boolean save = chartService.save(chart);
+    ThrowUtils.throwIf(!save, ErrorCode.SYSTEM_ERROR, "图表保存失败");
+    // todo 处理任务队列满了后，抛异常的情况
+    // 发送消息（图表id）,主要是注意到调用ai需要的数据都保存到图表数据库了
+    biMessageProducer.sendMessage(String.valueOf(chart.getId()));
+    // 返回给前端
+    BIResponse biResponse = new BIResponse();
+    biResponse.setChartId(chart.getId());
+    return ResultUtils.success(biResponse);
+}
+```
+
+`验证`
+验证发现，如果程序中断了，没有 ack、也没有 nack（服务中断，没有任何响应），那么这条消息会被重新放到消息队列中，从而实现了每个任务都会执行。
+
+`展示`
+
+![image-20231105164432598](assets/image-20231105164432598.png)
+
+![image-20231105164441712](assets/image-20231105164441712.png)
+
+![image-20231105164900726](assets/image-20231105164900726.png)
+
+![image-20231105164909224](assets/image-20231105164909224.png)
+
+##### 项目扩展
+
+优化点
+
+1. 给任务的执行增加 guava Retrying 重试机制，保证系统可靠性。
+2. 提前考虑到 AI 生成错误的情况，在后端进行异常处理（比如 AI 说了多余的话，提取正确的字符串）
+3. 如果说任务根本没提交到队列中（或者队列满了），是不是可以用定时任务把失败状态的图表放到队列中（补偿）
+4. 建议给任务的执行增加一个超时时间，超时自动标记为失败（超时控制）
+5. 反向压力：https://zhuanlan.zhihu.com/p/404993753，通过调用的服务状态来选择当前系统的策略（比如根据 AI 服务的当前任务队列数来控制咱们系统的核心线程数），从而最大化利用系统资源。
+6. 我的图表页面增加一个刷新、定时自动刷新的按钮，保证获取到图表的最新状态（前端轮询）
+7. 任务执行成功或失败，给用户发送实时消息通知（实时：websocket、server side event）
+
+更多优化点
+
+1. 支持用户查看图表原始数据
+2. 图表数据分表存储，提高查询灵活性和性能
+3. 支持分组（分标签）查看和检索图表
+4. 增加更多可选参数来控制图表的生成，比如图表配色等
+5. 支持用户对失败的图表进行手动重试
+6. 限制用户同时生成图表的数量，防止单用户抢占系统资源
+7. 统计用户生成图表的次数，甚至可以添加积分系统，消耗积分来智能分析
+8. 支持编辑生成后的图表的信息。比如可以使用代码编辑器来编辑 Echarts 图表配置代码
+9. 由于图表数据是静态的，很适合使用缓存来提高加载速度。
+10. 使用死信队列来处理异常情况，将图表生成任务置为失败
+11. 补充传统 BI 拥有的功能，把智能分析作为其中一个子模块。
+
+
 
 ## 前端
 
