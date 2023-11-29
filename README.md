@@ -2554,7 +2554,7 @@ public class DlxDirectConsumer {
         String queueName2 = "小狗的工作队列";
         channel1.queueDeclare(queueName1, true, false, false, args1);
         channel2.queueDeclare(queueName2, true, false, false, args2);
-        // 绑定死信交换机，指定路由键
+        // 绑定工作交换机，指定路由键
         channel1.queueBind(queueName1, WORK_EXCHANGE_NAME, "小猫");
         channel2.queueBind(queueName2, WORK_EXCHANGE_NAME, "小狗");
         System.out.println(" [*] Waiting for messages. To exit press CTRL+C");
